@@ -141,6 +141,7 @@ status = {
     "uid": None,         
     "records": [],      
     "phase": "idle",   # idle | writing | verifying
+    "completed_at": None,
 }
 
 def _set_phase(phase: str):
@@ -402,8 +403,8 @@ def compute_kas_amount(aud_amount_str: str):
     if not price:
         return None
     kas = aud / price
-    # return as string with up to 8 decimals (trim trailing zeros)
-    s = f"{kas:.8f}".rstrip('0').rstrip('.')
+    # return as string with exactly 2 decimals
+    s = f"{kas:.2f}"
     return s
 
 def start_writer(uri: str, transport: str):
@@ -418,6 +419,7 @@ def start_writer(uri: str, transport: str):
             "uid": None,
             "records": [],
             "phase": "writing",
+            "completed_at": None,
         })
     _broadcast_status()
 
@@ -462,6 +464,7 @@ def start_writer(uri: str, transport: str):
                     "uid": uid,
                     "records": records,
                     "phase": "idle",
+                    "completed_at": time.time(),
                 })
             _broadcast_status()
             print(("✅" if ok else "❌"), f"Write result: {msg}")
@@ -477,27 +480,18 @@ def index():
         config["message"]   = request.form.get("message", config["message"]).strip()
 
         # Build the final write URI in the required format:
-        # kaspa:... ?amount=KAS_AMOUNT&label=Store&message=...
+        # kaspa:... ?amount=KAS_AMOUNT&label=<message>&message=<message>
         base = config["address"]
         sep = '&' if '?' in base else '?'
         kas_amount = compute_kas_amount(config["amount"]) or config["amount"]
         uri = (
             f'{base}{sep}'
             f'amount={quote_plus(str(kas_amount))}'
-            f'&label={quote_plus("Store")}'
+            f'&label={quote_plus(config["message"])}'
             f'&message={quote_plus(config["message"])}'
         )
         start_writer(uri, config["transport"])
-        # Wait briefly so redirected GET shows final status (no SSE needed)
-        t_start = time.time()
-        while True:
-            with status_lock:
-                running_now = status["running"]
-            if not running_now:
-                break
-            if time.time() - t_start > 5.0:  # covers write+verify timings you shared (~2.2s)
-                break
-            time.sleep(0.05)
+        # Redirect immediately; client toasts will show Submitted then Success/Failure
         return redirect(url_for('index'))
 
     # Preview should match exactly what we write:
@@ -507,7 +501,7 @@ def index():
     full_url = (
         f'{base}{sep}'
         f'amount={quote_plus(str(kas_amount_preview)) if kas_amount_preview is not None else "..."}'
-        f'&label={quote_plus("Store")}'
+        f'&label={quote_plus(config["message"])}'
         f'&message={quote_plus(config["message"])}'
     )
 
@@ -529,6 +523,15 @@ def index():
     with _rate_lock:
         rate_val = _rate_aud_per_kas
         rate_updated = _rate_updated.isoformat() if _rate_updated else None
+    rate_str = (f"{rate_val:.6f}" if isinstance(rate_val, (int, float)) and rate_val is not None else None)
+
+    # Simple formatted time for main page (local time)
+    completed_at_str = None
+    if ctx.get('completed_at'):
+        try:
+            completed_at_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ctx['completed_at']))
+        except Exception:
+            completed_at_str = None
 
     return render_template(
         "index.html",
@@ -538,9 +541,11 @@ def index():
         full_url=full_url,
         kas_amount=kas_amount_preview,
         rate_aud_per_kas=rate_val,
+        rate_str=rate_str,
         rate_updated=rate_updated,
         verify=config.get("verify", False),
         status_message=status_message,    # renamed status text
+        completed_at=completed_at_str,
         **ctx,
     )
 
@@ -585,8 +590,37 @@ def status_json():
             "records":  status["records"],
             "phase":    status["phase"],
             "verify":   config.get("verify", False),
+            "completed_at": status["completed_at"],
         }
     rsp = make_response(jsonify(payload))
+    rsp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    rsp.headers["Pragma"] = "no-cache"
+    return rsp
+
+@app.route("/status_simple")
+def status_simple():
+    with status_lock:
+        ctx = {
+            "running":  status["running"],
+            "ok":       status["ok"],
+            "message":  status["message"],
+            "wrote_uri":status["wrote_uri"],
+            "uid":      status["uid"],
+            "records":  status["records"],
+            "phase":    status["phase"],
+        }
+    status_message = ctx.pop("message", "")
+    try:
+        html = render_template(
+            "_status_simple.html",
+            verify=config.get("verify", False),
+            status_message=status_message,
+            **ctx,
+        )
+    except Exception as e:
+        print("⚠️ /status_simple inline fallback (", e, ")")
+        html = _status_html_fallback(ctx, config.get("verify", False))
+    rsp = make_response(html)
     rsp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     rsp.headers["Pragma"] = "no-cache"
     return rsp
@@ -596,10 +630,18 @@ def rate_json():
     with _rate_lock:
         price = _rate_aud_per_kas
         updated = _rate_updated.isoformat() if _rate_updated else None
-    return jsonify({
-        'aud_per_kas': price,
-        'updated_at': updated,
-    })
+    return jsonify({'aud_per_kas': price, 'updated_at': updated})
+
+@app.route('/clear_status', methods=['POST'])
+def clear_status():
+    with status_lock:
+        if not status["running"]:
+            status.update({
+                "ok": None,
+                "message": "",
+                "completed_at": None,
+            })
+    return ('', 204)
 
 @app.route("/events")
 def sse_events():
@@ -659,7 +701,7 @@ def admin_page():
     full_url = (
         f'{base}{sep}'
         f'amount={quote_plus(str(kas_amount_preview)) if kas_amount_preview is not None else "..."}'
-        f'&label={quote_plus("Store")}'
+        f'&label={quote_plus(config["message"])}'
         f'&message={quote_plus(config["message"])}'
     )
     with status_lock:

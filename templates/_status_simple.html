@@ -1,0 +1,33 @@
+{% if running %}
+  {% if verify and phase == 'verifying' %}
+    <div class="alert alert-info d-flex align-items-center" role="alert">
+      <i class="bi bi-search me-2"></i>
+      <div>Identifying…</div>
+    </div>
+  {% elif phase == 'writing' %}
+    <div class="alert alert-primary d-flex align-items-center" role="alert">
+      <i class="bi bi-pencil-square me-2"></i>
+      <div>Writing…</div>
+    </div>
+  {% else %}
+    <div class="alert alert-warning d-flex align-items-center" role="alert">
+      <i class="bi bi-hourglass-split me-2"></i>
+      <div>Waiting for tag… writer is active.</div>
+    </div>
+  {% endif %}
+{% elif ok is not none %}
+  {% if ok %}
+    <div class="alert alert-success d-flex align-items-center" role="alert">
+      <i class="bi bi-check-circle me-2"></i>
+      <div>Success</div>
+    </div>
+  {% else %}
+    <div class="alert alert-danger d-flex align-items-center" role="alert">
+      <i class="bi bi-x-circle me-2"></i>
+      <div>Failed: {{ status_message }}</div>
+    </div>
+  {% endif %}
+{% else %}
+  <p class="text-muted mb-0">Idle.</p>
+{% endif %}
+

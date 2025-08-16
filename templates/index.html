@@ -16,17 +16,14 @@
             <div class="col-6">
               <label class="form-label">Amount (KAS)</label>
               <input type="text" class="form-control" id="kas_amount" value="{{ kas_amount }}" disabled />
-              <div class="form-text" id="rate_info">Rate: 1 KAS ≈ {{ rate_aud_per_kas or '…' }} AUD{% if rate_updated %} (as of {{ rate_updated }}){% endif %}</div>
+              <div class="form-text" id="rate_info" style="white-space: nowrap;">Rate: 1 KAS ≈ {{ rate_str or '…' }} AUD</div>
             </div>
           </div>
 
           <div>
             <label for="message" class="form-label">Message to customer</label>
-            <textarea class="form-control" id="message" name="message" rows="2"
-                      placeholder="Thanks from Bean-Me-Up coffee">{{ message }}</textarea>
-            <div class="form-text">
-              This appears in the payment request payload.
-            </div>
+            <input type="text" class="form-control" id="message" name="message" placeholder="Thanks from Bean-Me-Up coffee" value="{{ message }}" />
+            <div class="form-text">This appears in the payment request label</div>
           </div>
 
           <button type="submit" class="btn btn-primary" id="request-btn">
@@ -38,10 +35,17 @@
   </div>
 
   <div class="col-12 col-lg-4">
-    <div class="card shadow-sm mb-3">
+    <div class="card shadow-sm">
       <div class="card-header"><strong>Help</strong></div>
       <div class="card-body">
-        <p class="mb-0">Admin moves address, transport, preview, and status to <a href="/admin">/admin</a>.</p>
+        <p class="mb-0">Admin moves address, transport, preview, and detailed status to <a href="/admin">/admin</a>.</p>
+      </div>
+    </div>
+
+    <div class="card shadow-sm mt-3">
+      <div class="card-header"><strong>Status</strong></div>
+      <div class="card-body">
+        <div id="toast-area-inline"></div>
       </div>
     </div>
   </div>
@@ -56,10 +60,11 @@
     const kas = document.getElementById('kas_amount');
     const btn = document.getElementById('request-btn');
     let rate = {{ rate_aud_per_kas or 'null' }};
+    let toastState = 'idle';
+    let lastCompletedAt = null;
 
     function fmtKas(v){
-      const s = (Math.round(v * 1e8) / 1e8).toFixed(8).replace(/0+$/,'').replace(/\.$/,'');
-      return s || '0';
+      return (Math.round(v * 100) / 100).toFixed(2);
     }
     function update(){
       const v = parseFloat(amt.value);
@@ -69,25 +74,55 @@
       if (kas) kas.value = s;
       if (btn) btn.innerHTML = '<i class="bi bi-pencil-square me-1"></i> Request ' + s + ' Kaspa';
     }
+    function updateRateText(timeIso){
+      const info = document.getElementById('rate_info');
+      if (!info) return;
+      if (!rate) { info.textContent = 'Rate: 1 KAS ≈ … AUD'; return; }
+      let txt = 'Rate: 1 KAS ≈ ' + Number(rate).toFixed(6) + ' AUD';
+      if (timeIso) {
+        try { const t = new Date(timeIso).toLocaleTimeString(); txt += ' (as of ' + t + ')'; } catch {}
+      }
+      info.textContent = txt;
+    }
+
     async function refreshRate(){
       try {
         const r = await fetch('/rate.json?ts='+Date.now());
         const j = await r.json();
         if (j && j.aud_per_kas) {
-          rate = j.aud_per_kas;
+          rate = Number(j.aud_per_kas);
           update();
-          const info = document.getElementById('rate_info');
-          if (info) {
-            const t = j.updated_at ? new Date(j.updated_at).toLocaleTimeString() : null;
-            info.textContent = 'Rate: 1 KAS ≈ ' + rate + ' AUD' + (t ? ' (as of ' + t + ')' : '');
-          }
+          updateRateText(j.updated_at);
         }
       } catch {}
     }
     if (amt) amt.addEventListener('input', update);
+    // Disable submit briefly to signal the request was made
+    try {
+      const form = document.querySelector('form[action="/"]');
+      if (form && btn) {
+        form.addEventListener('submit', () => {
+          btn.disabled = true;
+          setTimeout(() => { try{ btn.disabled = false; }catch{} }, 1000);
+        });
+      }
+    } catch {}
     update();
+    updateRateText({{ (rate_updated or '')|tojson }});
     setInterval(refreshRate, 600000); // 10 minutes
     setTimeout(refreshRate, 1000);
+
+    async function refreshSimpleStatus(){
+      try {
+        const res = await fetch('/status_simple?ts='+Date.now(), {cache:'no-cache'});
+        if (!res.ok) return;
+        const html = await res.text();
+        const el = document.getElementById('toast-area-inline');
+        if (el) el.innerHTML = html;
+      } catch {}
+    }
+    setInterval(refreshSimpleStatus, 600);
+    setTimeout(refreshSimpleStatus, 200);
   })();
 </script>
 {% endblock %}
