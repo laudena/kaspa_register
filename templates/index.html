@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-4">
+  <div class="col-12 col-lg-7">
+    <div class="card shadow-sm">
+      <div class="card-header">
+        <strong>Update &amp; Write</strong>
+      </div>
+      <div class="card-body">
+        <form action="/" method="post" class="vstack gap-3">
+          <div>
+            <label for="address" class="form-label">Kaspa address</label>
+            <input type="text" class="form-control" id="address" name="address"
+                   value="{{ address }}" required />
+          </div>
+
+          <div class="row g-3">
+            <div class="col-6">
+              <label for="amount" class="form-label">Amount (AUD)</label>
+              <input type="text" class="form-control" id="amount" name="amount"
+                     value="{{ amount }}" />
+            </div>
+            <div class="col-6">
+              <label class="form-label">Transport</label>
+              <input type="text" class="form-control" value="{{ transport }}" disabled />
+            </div>
+          </div>
+
+          <div>
+            <label for="message" class="form-label">Message to customer</label>
+            <textarea class="form-control" id="message" name="message" rows="2"
+                      placeholder="Thanks from Bean-Me-Up coffee">{{ message }}</textarea>
+            <div class="form-text">
+              This appears in the payment request payload.
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-pencil-square me-1"></i> Update and Write
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-lg-5">
+    <div class="card shadow-sm mb-3">
+      <div class="card-header">
+        <strong>Preview</strong>
+      </div>
+      <div class="card-body">
+        <p class="text-muted mb-1">URI to write</p>
+        <code class="small d-block text-break">{{ full_url }}</code>
+      </div>
+    </div>
+
+    <div class="card shadow-sm">
+      <div class="card-header">
+        <strong>Status</strong>
+      </div>
+      <div class="card-body">
+        {% if running %}
+          <div class="alert alert-warning d-flex align-items-center" role="alert">
+            <i class="bi bi-hourglass-split me-2"></i>
+            <div>Waiting for tag… writer is active.</div>
+          </div>
+        {% elif ok is not none %}
+          {% if ok %}
+            <div class="alert alert-success d-flex align-items-center" role="alert">
+              <i class="bi bi-check-circle me-2"></i>
+              <div>
+                Wrote:
+                <code class="text-break">{{ wrote_uri }}</code>
+              </div>
+            </div>
+            {% if uid %}
+              <p class="mb-1">Tag UID: <code>{{ uid }}</code></p>
+            {% endif %}
+            {% if records and records|length > 0 %}
+              <p class="mb-1">Decoded records:</p>
+              <ul class="small">
+                {% for r in records %}
+                  <li>{{ r }}</li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          {% else %}
+            <div class="alert alert-danger d-flex align-items-center" role="alert">
+              <i class="bi bi-x-circle me-2"></i>
+              <div>Write failed: {{ status_message }}</div>
+            </div>
+          {% endif %}
+        {% else %}
+          <p class="text-muted mb-0">Idle.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
