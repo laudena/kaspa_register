@@ -1,5 +1,5 @@
 # kaspa_register.py
-from flask import Flask, request, render_template
+from flask import Flask, request, render_template, jsonify, make_response, redirect, url_for, Response
 import threading
 import time
 from urllib.parse import quote_plus
@@ -73,7 +73,106 @@ status = {
     "wrote_uri": "",
     "uid": None,         
     "records": [],      
+    "phase": "idle",   # idle | writing | verifying
 }
+
+def _set_phase(phase: str):
+    with status_lock:
+        status["phase"] = phase
+    _broadcast_status()
+
+# --- SSE support ---
+import queue
+
+_sse_lock = threading.Lock()
+_sse_clients = []  # list[queue.Queue[str]]
+
+def _status_context():
+    with status_lock:
+        ctx = {
+            "running":  status["running"],
+            "ok":       status["ok"],
+            "message":  status["message"],
+            "wrote_uri":status["wrote_uri"],
+            "uid":      status["uid"],
+            "records":  status["records"],
+            "phase":    status["phase"],
+        }
+    return ctx
+
+def _status_html_fallback(ctx, verify):
+    running = ctx.get("running")
+    ok = ctx.get("ok")
+    phase = ctx.get("phase")
+    wrote_uri = ctx.get("wrote_uri") or ""
+    uid = ctx.get("uid")
+    records = ctx.get("records") or []
+    status_message = ctx.get("message") or ""
+
+    def wrap(alert_class, icon, inner):
+        return (
+            f'<div class="alert {alert_class} d-flex align-items-center" role="alert">'
+            f'<i class="{icon} me-2"></i><div>{inner}</div></div>'
+        )
+
+    if running:
+        if verify and phase == 'verifying':
+            return wrap('alert-info', 'bi bi-shield-check', 'Verifying…')
+        if phase == 'writing':
+            return wrap('alert-primary', 'bi bi-pencil-square', 'Writing…')
+        return wrap('alert-warning', 'bi bi-hourglass-split', 'Waiting for tag… writer is active.')
+
+    if ok is not None:
+        if ok:
+            prefix = 'Wrote and verified:' if verify else 'Data was sent to the card.<br/>Wrote:'
+            html = wrap('alert-success', 'bi bi-check-circle', f'{prefix} <code class="text-break">{wrote_uri}</code>')
+            if uid:
+                html += f'<p class="mb-1">Tag UID: <code>{uid}</code></p>'
+            if verify and records:
+                items = ''.join(f'<li>{r}</li>' for r in records)
+                html += f'<p class="mb-1">Decoded records:</p><ul class="small">{items}</ul>'
+            return html
+        return wrap('alert-danger', 'bi bi-x-circle', f'Write failed: {status_message}')
+
+    return '<p class="text-muted mb-0">Idle.</p>'
+
+def _render_status_html(ctx=None):
+    if ctx is None:
+        ctx = _status_context()
+    status_message = ctx.get("message", "")
+    try:
+        with app.app_context():
+            return render_template(
+                "_status.html",
+                verify=config.get("verify", False),
+                status_message=status_message,
+                **ctx,
+            )
+    except Exception as e:
+        # Fallback if template is missing on target device
+        print("⚠️ Using inline status fallback (", e, ")")
+        return _status_html_fallback(ctx, config.get("verify", False))
+
+def _broadcast_status():
+    # Render once and fan out; never break request flow if template missing
+    try:
+        html = _render_status_html()
+    except Exception as e:
+        print("⚠️ SSE render failed:", e)
+        html = None
+    with _sse_lock:
+        dead = []
+        if html is not None:
+            for q in _sse_clients:
+                try:
+                    q.put_nowait(html)
+                except Exception:
+                    dead.append(q)
+        for q in dead:
+            try:
+                _sse_clients.remove(q)
+            except ValueError:
+                pass
 
 def pn532_enable():
     _ready_led.value = False
@@ -200,6 +299,10 @@ def write_with_ntag_writer(uri: str, transport: str):
     records = []
     t_verify_ms = None
     if config.get("verify", False):
+        try:
+            _set_phase("verifying")
+        except Exception:
+            pass
         tv0 = time.perf_counter()
         records = writer.verify()
         tv1 = time.perf_counter()
@@ -224,7 +327,9 @@ def start_writer(uri: str, transport: str):
             "wrote_uri": uri,
             "uid": None,
             "records": [],
+            "phase": "writing",
         })
+    _broadcast_status()
 
     def _task():
         ok = False
@@ -247,6 +352,10 @@ def start_writer(uri: str, transport: str):
             )
             ok = True
             msg = "Done"
+            if not config.get("verify", False):
+                msg = "Data was sent to the card"
+            else:
+                msg = "Done (verified)"
         except (NfcError, NDEFWriterError) as e:
             ok = False
             msg = str(e)
@@ -262,7 +371,9 @@ def start_writer(uri: str, transport: str):
                     "message": msg,
                     "uid": uid,
                     "records": records,
+                    "phase": "idle",
                 })
+            _broadcast_status()
             print(("✅" if ok else "❌"), f"Write result: {msg}")
 
     threading.Thread(target=_task, daemon=True).start()
@@ -286,6 +397,17 @@ def index():
             f'&message={quote_plus(config["message"])}'
         )
         start_writer(uri, config["transport"])
+        # Wait briefly so redirected GET shows final status (no SSE needed)
+        t_start = time.time()
+        while True:
+            with status_lock:
+                running_now = status["running"]
+            if not running_now:
+                break
+            if time.time() - t_start > 5.0:  # covers write+verify timings you shared (~2.2s)
+                break
+            time.sleep(0.05)
+        return redirect(url_for('index'))
 
     # Preview should match exactly what we write:
     base = config["address"]
@@ -305,6 +427,7 @@ def index():
             "wrote_uri":status["wrote_uri"],
             "uid":      status["uid"],
             "records":  status["records"],
+            "phase":    status["phase"],
         }
 
     # Avoid name collision with the merchant's "message"
@@ -319,8 +442,91 @@ def index():
         full_url=full_url,
         transport=config["transport"],
         reader_hint=config["reader_hint"],
+        verify=config.get("verify", False),
         status_message=status_message,    # renamed status text
         **ctx,
     )
+
+@app.route("/status_panel")
+def status_panel():
+    """Return just the status panel body as an HTML snippet for polling."""
+    with status_lock:
+        ctx = {
+            "running":  status["running"],
+            "ok":       status["ok"],
+            "message":  status["message"],
+            "wrote_uri":status["wrote_uri"],
+            "uid":      status["uid"],
+            "records":  status["records"],
+            "phase":    status["phase"],
+        }
+    status_message = ctx.pop("message", "")
+    try:
+        html = render_template(
+                "_status.html",
+                verify=config.get("verify", False),
+                status_message=status_message,
+                **ctx,
+            )
+    except Exception as e:
+        print("⚠️ /status_panel using inline fallback (", e, ")")
+        html = _status_html_fallback(ctx, config.get("verify", False))
+    rsp = make_response(html)
+    rsp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    rsp.headers["Pragma"] = "no-cache"
+    return rsp
+
+@app.route("/status.json")
+def status_json():
+    with status_lock:
+        payload = {
+            "running":  status["running"],
+            "ok":       status["ok"],
+            "message":  status["message"],
+            "wrote_uri":status["wrote_uri"],
+            "uid":      status["uid"],
+            "records":  status["records"],
+            "phase":    status["phase"],
+            "verify":   config.get("verify", False),
+        }
+    rsp = make_response(jsonify(payload))
+    rsp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    rsp.headers["Pragma"] = "no-cache"
+    return rsp
+
+@app.route("/events")
+def sse_events():
+    q = queue.Queue(maxsize=10)
+    with _sse_lock:
+        _sse_clients.append(q)
+
+    def gen():
+        # Send initial snapshot
+        try:
+            init_html = _render_status_html()
+            init_html = init_html.replace("\n", "\ndata: ")
+            yield "data: " + init_html + "\n\n"
+        except Exception:
+            pass
+        try:
+            while True:
+                try:
+                    html = q.get(timeout=15)
+                    html = html.replace("\n", "\ndata: ")
+                    yield "data: " + html + "\n\n"
+                except queue.Empty:
+                    # heartbeat to keep connection alive
+                    yield ": keep-alive\n\n"
+        finally:
+            with _sse_lock:
+                try:
+                    _sse_clients.remove(q)
+                except ValueError:
+                    pass
+
+    rsp = Response(gen(), mimetype='text/event-stream')
+    rsp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    rsp.headers['X-Accel-Buffering'] = 'no'  # disable proxy buffering if any
+    return rsp
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
