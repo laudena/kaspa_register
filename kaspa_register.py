@@ -1,9 +1,17 @@
 # kaspa_register.py
 from flask import Flask, request, render_template, jsonify, make_response, redirect, url_for, Response
+import os
+import json
+from datetime import datetime, timezone
+try:
+    import requests
+except Exception:
+    requests = None
 import threading
 import time
 from urllib.parse import quote_plus
 import board, digitalio
+
 
 # Own the reset line (RSTPD_N, active-low). Keep it OFF at boot.
 _rst_pin = digitalio.DigitalInOut(board.D25)
@@ -47,10 +55,32 @@ from ntag_writer import (
 )
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('KASPA_SECRET', 'change-me')
 
-# Default config
+# Settings persisted to a JSON file
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'settings.json')
+
+def _load_settings():
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_settings(data: dict):
+    try:
+        tmp = CONFIG_PATH + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, CONFIG_PATH)
+    except Exception as e:
+        print('⚠️ Failed to save settings:', e)
+
+_file_settings = _load_settings()
+
+# Default config (address loaded from file if present)
 config = {
-    "address": "kaspa:qqll33tlfscxfyzwp204l06wgtz32yckln5nlpqanmcvk5xgphxpc57sark5n",
+    "address": _file_settings.get("address", "kaspa:qqll33tlfscxfyzwp204l06wgtz32yckln5nlpqanmcvk5xgphxpc57sark5n"),
     "amount": "5.00",
     "transport": "pn532",      # default 
     "reader_hint": "ACR1252",  # only used for ACR
@@ -59,6 +89,43 @@ config = {
     "poll_timeout": 0.05,      # <-- when we DO wait, keep it short
     "message": "Thanks!!!",
 }
+
+# --- Conversion rate (AUD -> KAS) ---
+_rate_lock = threading.Lock()
+_rate_aud_per_kas = None  # float or None
+_rate_updated = None      # datetime or None
+
+def fetch_rate_once():
+    global _rate_aud_per_kas, _rate_updated
+    if requests is None:
+        return
+    try:
+        # Coingecko simple price API (AUD)
+        url = 'https://api.coingecko.com/api/v3/simple/price?ids=kaspa&vs_currencies=aud'
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        price = float(data.get('kaspa', {}).get('aud'))
+        if price > 0:
+            with _rate_lock:
+                _rate_aud_per_kas = price
+                _rate_updated = datetime.now(timezone.utc)
+    except Exception as e:
+        # Keep last known
+        print('⚠️ Rate fetch failed:', e)
+
+def rate_updater_thread():
+    while True:
+        fetch_rate_once()
+        # every 10 minutes
+        time.sleep(600)
+
+def get_rate():
+    with _rate_lock:
+        return _rate_aud_per_kas
+
+if not _file_settings.get("address"):
+    _save_settings({"address": config["address"]})
 
 
 _transport_cache = {"pn532": None, "acr": None}
@@ -220,6 +287,15 @@ def pn532_disable():
 
 # (HTML moved to templates/index.html + templates/base.html)
 
+def _admin_auth_required():
+    expected = os.environ.get('KASPA_ADMIN_PASSWORD', 'admin')
+    auth = request.authorization
+    if not auth or auth.password != expected:
+        rsp = Response('Authentication required', 401)
+        rsp.headers['WWW-Authenticate'] = 'Basic realm="Kaspa Admin"'
+        return rsp
+    return None
+
 def get_transport(kind: str):
     with _transport_lock:
         if kind == "pn532":
@@ -316,6 +392,20 @@ def write_with_ntag_writer(uri: str, transport: str):
     }
     return {"uid": uid_hex, "records": records, "times": times}
 
+# --- Conversion helpers ---
+def compute_kas_amount(aud_amount_str: str):
+    try:
+        aud = float(aud_amount_str)
+    except Exception:
+        return None
+    price = get_rate()
+    if not price:
+        return None
+    kas = aud / price
+    # return as string with up to 8 decimals (trim trailing zeros)
+    s = f"{kas:.8f}".rstrip('0').rstrip('.')
+    return s
+
 def start_writer(uri: str, transport: str):
     with status_lock:
         if status["running"]:
@@ -382,17 +472,18 @@ def start_writer(uri: str, transport: str):
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
-        config["address"]   = request.form.get("address", config["address"]).strip()
+        # Address is managed via admin page and persisted to file
         config["amount"]    = request.form.get("amount",  config["amount"]).strip()
         config["message"]   = request.form.get("message", config["message"]).strip()
 
         # Build the final write URI in the required format:
-        # kaspa:... ?amount=1.23&label=Store&message=...
+        # kaspa:... ?amount=KAS_AMOUNT&label=Store&message=...
         base = config["address"]
         sep = '&' if '?' in base else '?'
+        kas_amount = compute_kas_amount(config["amount"]) or config["amount"]
         uri = (
             f'{base}{sep}'
-            f'amount={quote_plus(config["amount"])}'
+            f'amount={quote_plus(str(kas_amount))}'
             f'&label={quote_plus("Store")}'
             f'&message={quote_plus(config["message"])}'
         )
@@ -412,9 +503,10 @@ def index():
     # Preview should match exactly what we write:
     base = config["address"]
     sep = '&' if '?' in base else '?'
+    kas_amount_preview = compute_kas_amount(config["amount"])  # None until rate available
     full_url = (
         f'{base}{sep}'
-        f'amount={quote_plus(config["amount"])}'
+        f'amount={quote_plus(str(kas_amount_preview)) if kas_amount_preview is not None else "..."}'
         f'&label={quote_plus("Store")}'
         f'&message={quote_plus(config["message"])}'
     )
@@ -433,15 +525,20 @@ def index():
     # Avoid name collision with the merchant's "message"
     status_message = ctx.pop("message", "")
 
+    # Capture rate + timestamp for display
+    with _rate_lock:
+        rate_val = _rate_aud_per_kas
+        rate_updated = _rate_updated.isoformat() if _rate_updated else None
+
     return render_template(
         "index.html",
         page_title="Kaspa Point of Sale Control",
-        address=config["address"],
         amount=config["amount"],
         message=config["message"],        # merchant message (form field)
         full_url=full_url,
-        transport=config["transport"],
-        reader_hint=config["reader_hint"],
+        kas_amount=kas_amount_preview,
+        rate_aud_per_kas=rate_val,
+        rate_updated=rate_updated,
         verify=config.get("verify", False),
         status_message=status_message,    # renamed status text
         **ctx,
@@ -494,6 +591,16 @@ def status_json():
     rsp.headers["Pragma"] = "no-cache"
     return rsp
 
+@app.route('/rate.json')
+def rate_json():
+    with _rate_lock:
+        price = _rate_aud_per_kas
+        updated = _rate_updated.isoformat() if _rate_updated else None
+    return jsonify({
+        'aud_per_kas': price,
+        'updated_at': updated,
+    })
+
 @app.route("/events")
 def sse_events():
     q = queue.Queue(maxsize=10)
@@ -528,5 +635,57 @@ def sse_events():
     rsp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     rsp.headers['X-Accel-Buffering'] = 'no'  # disable proxy buffering if any
     return rsp
+
+@app.route('/admin', methods=['GET', 'POST'])
+def admin_page():
+    auth_fail = _admin_auth_required()
+    if auth_fail is not None:
+        return auth_fail
+
+    if request.method == 'POST':
+        new_addr = request.form.get('address', '').strip()
+        if new_addr:
+            config['address'] = new_addr
+            try:
+                _save_settings({"address": new_addr})
+            except Exception:
+                pass
+        return redirect(url_for('admin_page'))
+
+    # Build a preview based on current config and conversion
+    base = config["address"]
+    sep = '&' if '?' in base else '?'
+    kas_amount_preview = compute_kas_amount(config["amount"])  # None until rate available
+    full_url = (
+        f'{base}{sep}'
+        f'amount={quote_plus(str(kas_amount_preview)) if kas_amount_preview is not None else "..."}'
+        f'&label={quote_plus("Store")}'
+        f'&message={quote_plus(config["message"])}'
+    )
+    with status_lock:
+        ctx = {
+            "running":  status["running"],
+            "ok":       status["ok"],
+            "message":  status["message"],
+            "wrote_uri":status["wrote_uri"],
+            "uid":      status["uid"],
+            "records":  status["records"],
+            "phase":    status["phase"],
+        }
+    status_message = ctx.pop("message", "")
+    status_html = _render_status_html({**ctx, "message": status_message})
+    return render_template(
+        'admin.html',
+        page_title='Kaspa Admin',
+        address=config['address'],
+        transport=config['transport'],
+        full_url=full_url,
+        verify=config.get('verify', False),
+        status_message=status_message,
+        status_html=status_html,
+        **ctx,
+    )
 if __name__ == "__main__":
+    # Start periodic rate updater (tolerates missing requests module)
+    threading.Thread(target=rate_updater_thread, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)

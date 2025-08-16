@@ -1,28 +1,22 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="row g-4">
-  <div class="col-12 col-lg-7">
+  <div class="col-12 col-lg-8">
     <div class="card shadow-sm">
       <div class="card-header">
-        <strong>Update &amp; Write</strong>
+        <strong>Request Payment</strong>
       </div>
       <div class="card-body">
         <form action="/" method="post" class="vstack gap-3">
-          <div>
-            <label for="address" class="form-label">Kaspa address</label>
-            <input type="text" class="form-control" id="address" name="address"
-                   value="{{ address }}" required />
-          </div>
-
           <div class="row g-3">
             <div class="col-6">
               <label for="amount" class="form-label">Amount (AUD)</label>
-              <input type="text" class="form-control" id="amount" name="amount"
-                     value="{{ amount }}" />
+              <input type="text" class="form-control" id="amount" name="amount" value="{{ amount }}" />
             </div>
             <div class="col-6">
-              <label class="form-label">Transport</label>
-              <input type="text" class="form-control" value="{{ transport }}" disabled />
+              <label class="form-label">Amount (KAS)</label>
+              <input type="text" class="form-control" id="kas_amount" value="{{ kas_amount }}" disabled />
+              <div class="form-text" id="rate_info">Rate: 1 KAS ≈ {{ rate_aud_per_kas or '…' }} AUD{% if rate_updated %} (as of {{ rate_updated }}){% endif %}</div>
             </div>
           </div>
 
@@ -35,31 +29,19 @@
             </div>
           </div>
 
-          <button type="submit" class="btn btn-primary">
-            <i class="bi bi-pencil-square me-1"></i> Update and Write
+          <button type="submit" class="btn btn-primary" id="request-btn">
+            <i class="bi bi-pencil-square me-1"></i> Request {{ kas_amount or 'KAS' }} Kaspa
           </button>
         </form>
       </div>
     </div>
   </div>
 
-  <div class="col-12 col-lg-5">
+  <div class="col-12 col-lg-4">
     <div class="card shadow-sm mb-3">
-      <div class="card-header">
-        <strong>Preview</strong>
-      </div>
+      <div class="card-header"><strong>Help</strong></div>
       <div class="card-body">
-        <p class="text-muted mb-1">URI to write</p>
-        <code class="small d-block text-break">{{ full_url }}</code>
-      </div>
-    </div>
-
-    <div class="card shadow-sm">
-      <div class="card-header">
-        <strong>Status</strong>
-      </div>
-      <div id="status-container" class="card-body">
-        {% include "_status.html" %}
+        <p class="mb-0">Admin moves address, transport, preview, and status to <a href="/admin">/admin</a>.</p>
       </div>
     </div>
   </div>
@@ -68,64 +50,44 @@
 
 {% block scripts %}
 <script>
-  let pollTimer = null;
-  function startPollingFallback() {
-    if (pollTimer) return;
-    async function refreshStatusPanel() {
+  // Live KAS conversion on amount changes, with periodic rate refresh.
+  (function(){
+    const amt = document.getElementById('amount');
+    const kas = document.getElementById('kas_amount');
+    const btn = document.getElementById('request-btn');
+    let rate = {{ rate_aud_per_kas or 'null' }};
+
+    function fmtKas(v){
+      const s = (Math.round(v * 1e8) / 1e8).toFixed(8).replace(/0+$/,'').replace(/\.$/,'');
+      return s || '0';
+    }
+    function update(){
+      const v = parseFloat(amt.value);
+      if (!isFinite(v) || !rate || rate <= 0) return;
+      const k = v / rate;
+      const s = fmtKas(k);
+      if (kas) kas.value = s;
+      if (btn) btn.innerHTML = '<i class="bi bi-pencil-square me-1"></i> Request ' + s + ' Kaspa';
+    }
+    async function refreshRate(){
       try {
-        const res = await fetch('/status_panel?ts=' + Date.now(), { cache: 'no-cache' });
-        if (!res.ok) return;
-        const html = await res.text();
-        const el = document.getElementById('status-container');
-        if (el) el.innerHTML = html;
-      } catch (e) {
-        try {
-          const j = await fetch('/status.json?ts=' + Date.now(), { cache: 'no-cache' }).then(r => r.json());
-          const el = document.getElementById('status-container');
-          if (!el) return;
-          if (j.running && j.verify && j.phase === 'verifying') {
-            el.innerHTML = '<div class="alert alert-info d-flex align-items-center" role="alert">\
-              <i class="bi bi-shield-check me-2"></i><div>Verifying…</div></div>';
-          } else if (j.running) {
-            el.innerHTML = '<div class="alert alert-warning d-flex align-items-center" role="alert">\
-              <i class="bi bi-hourglass-split me-2"></i><div>Waiting for tag… writer is active.</div></div>';
-          } else if (j.ok === true) {
-            const prefix = j.verify ? 'Wrote and verified:' : 'Data was sent to the card.<br/>Wrote:';
-            el.innerHTML = '<div class="alert alert-success d-flex align-items-center" role="alert">\
-              <i class="bi bi-check-circle me-2"></i><div>' + prefix + ' <code class="text-break">' + (j.wrote_uri || '') + '</code></div></div>';
-          } else if (j.ok === false) {
-            el.innerHTML = '<div class="alert alert-danger d-flex align-items-center" role="alert">\
-              <i class="bi bi-x-circle me-2"></i><div>Write failed: ' + (j.message || '') + '</div></div>';
-          } else {
-            el.innerHTML = '<p class="text-muted mb-0">Idle.</p>';
+        const r = await fetch('/rate.json?ts='+Date.now());
+        const j = await r.json();
+        if (j && j.aud_per_kas) {
+          rate = j.aud_per_kas;
+          update();
+          const info = document.getElementById('rate_info');
+          if (info) {
+            const t = j.updated_at ? new Date(j.updated_at).toLocaleTimeString() : null;
+            info.textContent = 'Rate: 1 KAS ≈ ' + rate + ' AUD' + (t ? ' (as of ' + t + ')' : '');
           }
-        } catch {}
-      }
-    }
-    pollTimer = setInterval(refreshStatusPanel, 1000);
-    window.addEventListener('load', () => setTimeout(refreshStatusPanel, 200));
-  }
-
-  function startSSE() {
-    if (!('EventSource' in window)) { startPollingFallback(); return; }
-    try {
-      const es = new EventSource('/events');
-      es.onmessage = (evt) => {
-        const el = document.getElementById('status-container');
-        if (el && typeof evt.data === 'string') {
-          el.innerHTML = evt.data;
         }
-      };
-      es.onerror = () => {
-        // fallback on errors
-        try { es.close(); } catch {}
-        startPollingFallback();
-      };
-    } catch (e) {
-      startPollingFallback();
+      } catch {}
     }
-  }
-
-  startSSE();
+    if (amt) amt.addEventListener('input', update);
+    update();
+    setInterval(refreshRate, 600000); // 10 minutes
+    setTimeout(refreshRate, 1000);
+  })();
 </script>
 {% endblock %}
