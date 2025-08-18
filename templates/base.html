@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ page_title or "Kaspa Point of Sale Control" }}</title>
+    <link rel="icon" href="{{ url_for('static', filename='img/kaspa-icon-256.png') }}" sizes="any">
+    <meta name="theme-color" content="#091744" />
 
     <!-- Bootstrap 5 (no build step) -->
     <link
@@ -22,10 +24,11 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
   </head>
   <body>
-    <nav class="navbar navbar-dark bg-dark">
+    <nav class="navbar navbar-dark" style="background:#091744;">
       <div class="container d-flex align-items-center">
-        <span class="navbar-brand mb-0 h1">
-          <i class="bi bi-cash-coin me-2"></i>{{ page_title or "Kaspa Point of Sale Control" }}
+        <span class="navbar-brand mb-0 h1 d-flex align-items-center">
+          <img src="{{ url_for('static', filename='img/kaspa-icon-256.png') }}" alt="Kaspa" width="30" height="30" class="me-2"/>
+          {{ page_title or "Kaspa Point of Sale Control" }}
         </span>
         <a href="/admin" class="btn btn-outline-light btn-sm ms-auto">
           <i class="bi bi-gear"></i> Admin

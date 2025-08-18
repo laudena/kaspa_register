@@ -84,7 +84,7 @@ config = {
     "amount": "5.00",
     "transport": "pn532",      # default 
     "reader_hint": "ACR1252",  # only used for ACR
-    "verify": True,
+    "verify": False,
     "assume_present": True,    # <-- glued tag: skip waiting loops
     "poll_timeout": 0.05,      # <-- when we DO wait, keep it short
     "message": "Thanks!!!",
@@ -535,7 +535,7 @@ def index():
 
     return render_template(
         "index.html",
-        page_title="Kaspa Point of Sale Control",
+        page_title="Kaspa Point of Sale - Merchant Control",
         amount=config["amount"],
         message=config["message"],        # merchant message (form field)
         full_url=full_url,

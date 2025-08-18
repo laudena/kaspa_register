@@ -2,3 +2,15 @@ code {
   word-break: break-word;
 }
 
+/* Submit button colors per request */
+.btn-primary {
+  background-color: #70C7BA;
+  border-color: #70C7BA;
+}
+.btn-primary:hover,
+.btn-primary:focus,
+.btn-primary:active,
+.btn-primary:focus-visible {
+  background-color: #49EACB;
+  border-color: #49EACB;
+}

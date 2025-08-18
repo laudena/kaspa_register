@@ -3,7 +3,8 @@
 <div class="row g-4">
   <div class="col-12 col-lg-8">
     <div class="card shadow-sm">
-      <div class="card-header">
+      <div class="card-header d-flex align-items-center">
+        <img src="{{ url_for('static', filename='img/kaspa-icon-256.png') }}" alt="Kaspa" width="30" height="30" class="me-2"/>
         <strong>Request Payment</strong>
       </div>
       <div class="card-body">
@@ -35,15 +36,15 @@
   </div>
 
   <div class="col-12 col-lg-4">
-    <div class="card shadow-sm">
-      <div class="card-header"><strong>Help</strong></div>
-      <div class="card-body">
-        <p class="mb-0">Admin moves address, transport, preview, and detailed status to <a href="/admin">/admin</a>.</p>
-      </div>
-    </div>
+<!--    <div class="card shadow-sm">-->
+<!--      <div class="card-header d-flex align-items-center"><i class="bi bi-info-circle me-2"></i><strong>Help</strong></div>-->
+<!--      <div class="card-body">-->
+<!--        <p class="mb-0">To change your address, transport, preview, and see detailed status go to <a href="/admin">/admin</a>.</p>-->
+<!--      </div>-->
+<!--    </div>-->
 
     <div class="card shadow-sm mt-3">
-      <div class="card-header"><strong>Status</strong></div>
+      <div class="card-header d-flex align-items-center"><i class="bi bi-activity me-2"></i><strong>Status</strong></div>
       <div class="card-body">
         <div id="toast-area-inline"></div>
       </div>
