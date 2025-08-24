@@ -284,9 +284,15 @@ class Ntag21xWriter:
                 pidx, best = i, p
         tail = uri[len(best):].encode("utf-8")
         payload = bytes([pidx]) + tail
-        header = 0xD1  # MB|ME|SR + TNF=1 (well-known)
         t = b"U"
-        return bytes([header, len(t), len(payload)]) + t + payload
+        # Use Short Record (SR) only if payload < 256; otherwise 4-byte length
+        if len(payload) < 256:
+            header = 0xD1  # MB|ME|SR + TNF=1 (well-known)
+            return bytes([header, len(t), len(payload)]) + t + payload
+        else:
+            header = 0xC1  # MB|ME (no SR) + TNF=1
+            plen = len(payload).to_bytes(4, "big")
+            return bytes([header, len(t)]) + plen + t + payload
 
     @staticmethod
     def _parse_ndef_records(msg: bytes) -> List[str]:
